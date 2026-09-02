@@ -269,6 +269,10 @@ class APIConnectionError(Exception):
     """Test double matching the provider exception name used by the retry policy."""
 
 
+class APITimeoutError(APIConnectionError):
+    """Test double matching OpenAI's timeout exception hierarchy."""
+
+
 class _RawTextAnalyzer(LLMAnalyzerBase):
     """Test analyzer for raw-string mode."""
 
@@ -646,7 +650,7 @@ class TestRunBatches:
         assert [item[0].file_path for item in outcome.successful] == ["a.py"]
         assert outcome.failures == []
         assert analyzer._structured_llm.invoke.call_count == 2
-        sleep.assert_called_once_with(0.5)
+        sleep.assert_called_once_with(1)
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.time.sleep")
@@ -667,9 +671,9 @@ class TestRunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.invoke.call_count == 4
         assert sleep.call_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -691,9 +695,9 @@ class TestRunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.invoke.call_count == 4
         assert sleep.call_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -710,7 +714,7 @@ class TestRunBatches:
         assert [item[0].file_path for item in outcome.successful] == ["a.py"]
         assert outcome.failures == []
         assert provider.complete.call_count == 2
-        sleep.assert_called_once_with(0.5)
+        sleep.assert_called_once_with(1)
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.time.sleep")
@@ -740,32 +744,42 @@ class TestRunBatches:
         ]
         assert analyzer._structured_llm.invoke.call_count == 5
         assert sleep.call_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.time.sleep")
-    def test_api_connection_error_recovers_with_bounded_backoff(self, sleep: MagicMock) -> None:
+    def test_api_connection_error_recovers_with_bounded_backoff(
+        self, sleep: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
         analyzer = LLMAnalyzerBase(base_prompt="test", model=self.MODEL)
+        root_cause = TimeoutError("connect timed out")
+        connection_error = APIConnectionError("provider detail")
+        connection_error.__cause__ = root_cause
         analyzer._structured_llm.invoke = MagicMock(
-            side_effect=[APIConnectionError("provider detail"), LLMAnalysisResult(findings=[])]
+            side_effect=[connection_error, LLMAnalysisResult(findings=[])]
         )
 
-        outcome = analyzer.run_batches_detailed([Batch(file_path="a.py", content="code")])
+        with caplog.at_level("WARNING", logger="skillspector.llm_analyzer_base"):
+            outcome = analyzer.run_batches_detailed([Batch(file_path="a.py", content="code")])
 
         assert len(outcome.successful) == 1
         assert outcome.failures == []
         assert analyzer._structured_llm.invoke.call_count == 2
-        sleep.assert_called_once_with(0.5)
+        sleep.assert_called_once_with(1)
+        assert "APIConnectionError: provider detail" in caplog.text
+        assert "caused by TimeoutError: connect timed out" in caplog.text
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.time.sleep")
-    def test_api_connection_error_isolated_after_four_attempts(self, sleep: MagicMock) -> None:
+    def test_api_connection_error_isolated_after_six_attempts(self, sleep: MagicMock) -> None:
         analyzer = LLMAnalyzerBase(base_prompt="test", model=self.MODEL)
         analyzer._structured_llm.invoke = MagicMock(
             side_effect=[
+                APIConnectionError("provider detail"),
+                APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
@@ -785,11 +799,13 @@ class TestRunBatches:
         assert [(failure.batch.file_path, failure.reason) for failure in outcome.failures] == [
             ("failed.py", LedgerReason.LLM_CONNECTION_RETRIES_EXHAUSTED)
         ]
-        assert analyzer._structured_llm.invoke.call_count == 5
+        assert analyzer._structured_llm.invoke.call_count == 7
         assert sleep.call_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
+            ((20,), {}),
+            ((30,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -814,11 +830,26 @@ class TestRunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.invoke.call_count == 5
         assert sleep.call_args_list == [
-            ((0.5,), {}),
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    @patch("skillspector.llm_analyzer_base.time.sleep")
+    def test_api_timeout_error_uses_connection_retry_policy(self, sleep: MagicMock) -> None:
+        analyzer = LLMAnalyzerBase(base_prompt="test", model=self.MODEL)
+        analyzer._structured_llm.invoke = MagicMock(
+            side_effect=[APITimeoutError("Request timed out"), LLMAnalysisResult(findings=[])]
+        )
+
+        outcome = analyzer.run_batches_detailed([Batch(file_path="a.py", content="code")])
+
+        assert len(outcome.successful) == 1
+        assert outcome.failures == []
+        assert analyzer._structured_llm.invoke.call_count == 2
+        sleep.assert_called_once_with(1)
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     def test_value_error_still_propagates_without_retry(self) -> None:
@@ -1086,7 +1117,7 @@ class TestARunBatches:
         assert [item[0].file_path for item in outcome.successful] == ["a.py"]
         assert outcome.failures == []
         assert analyzer._structured_llm.ainvoke.call_count == 2
-        sleep.assert_awaited_once_with(0.5)
+        sleep.assert_awaited_once_with(1)
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.asyncio.sleep", new_callable=AsyncMock)
@@ -1109,9 +1140,9 @@ class TestARunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.ainvoke.call_count == 4
         assert sleep.await_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -1133,9 +1164,9 @@ class TestARunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.ainvoke.call_count == 4
         assert sleep.await_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -1166,9 +1197,9 @@ class TestARunBatches:
         ]
         assert analyzer._structured_llm.ainvoke.call_count == 5
         assert sleep.await_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -1186,7 +1217,7 @@ class TestARunBatches:
         assert len(outcome.successful) == 1
         assert outcome.failures == []
         assert analyzer._structured_llm.ainvoke.call_count == 2
-        sleep.assert_awaited_once_with(0.5)
+        sleep.assert_awaited_once_with(1)
 
     @patch(MOCK_PATCH_TARGET)
     @patch("skillspector.llm_analyzer_base.asyncio.sleep", new_callable=AsyncMock)
@@ -1208,12 +1239,14 @@ class TestARunBatches:
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     @patch("skillspector.llm_analyzer_base.asyncio.sleep", new_callable=AsyncMock)
-    async def test_api_connection_error_isolated_after_four_attempts(
+    async def test_api_connection_error_isolated_after_six_attempts(
         self, sleep: AsyncMock
     ) -> None:
         analyzer = LLMAnalyzerBase(base_prompt="test", model=self.MODEL)
         analyzer._structured_llm.ainvoke = AsyncMock(
             side_effect=[
+                APIConnectionError("provider detail"),
+                APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
                 APIConnectionError("provider detail"),
@@ -1234,11 +1267,13 @@ class TestARunBatches:
         assert [(failure.batch.file_path, failure.reason) for failure in outcome.failures] == [
             ("failed.py", LedgerReason.LLM_CONNECTION_RETRIES_EXHAUSTED)
         ]
-        assert analyzer._structured_llm.ainvoke.call_count == 5
+        assert analyzer._structured_llm.ainvoke.call_count == 7
         assert sleep.await_args_list == [
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
+            ((20,), {}),
+            ((30,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
@@ -1263,10 +1298,10 @@ class TestARunBatches:
         assert outcome.failures == []
         assert analyzer._structured_llm.ainvoke.call_count == 5
         assert sleep.await_args_list == [
-            ((0.5,), {}),
-            ((0.5,), {}),
-            ((1.0,), {}),
-            ((2.0,), {}),
+            ((1,), {}),
+            ((1,), {}),
+            ((5,), {}),
+            ((10,), {}),
         ]
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)

@@ -43,7 +43,12 @@ def _configure() -> None:
     if not root.handlers:
         handler = logging.StreamHandler(sys.stderr)
         handler.setLevel(_level_from_string(SKILLSPECTOR_LOG_LEVEL))
-        handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S%z",
+            )
+        )
         root.addHandler(handler)
     root.setLevel(_level_from_string(SKILLSPECTOR_LOG_LEVEL))
     _configured = True

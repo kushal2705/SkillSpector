@@ -100,7 +100,7 @@ err_console = Console(stderr=True)
 
 _TRANSITIVE_MAX_TARGETS = 32
 _TRANSITIVE_MAX_BYTES = 10 * 1024 * 1024
-_TRANSITIVE_MAX_SECONDS = 60.0
+_TRANSITIVE_MAX_SECONDS = 1200.0
 _TRANSITIVE_MAX_ARTIFACTS = 10_000
 _TRANSITIVE_MAX_FINDINGS = 10_000
 _TRANSITIVE_MAX_COMPONENTS = 10_000
@@ -580,6 +580,7 @@ def scan(
             raise typer.Exit(code=2) from e
         return
 
+    scan_started_at = monotonic()
     if verbose:
         set_level("DEBUG")
 
@@ -718,6 +719,7 @@ def scan(
     finally:
         if result is not None:
             cleanup_result(result)
+        logger.info("Total scan time: %.2f seconds", monotonic() - scan_started_at)
 
 
 def _build_trace_config(input_path: str, format: FormatChoice, no_llm: bool) -> RunnableConfig:

@@ -110,12 +110,17 @@ def test_cli_scan_help_lists_every_available_provider() -> None:
         assert provider in result.output
 
 
-def test_cli_scan_local_directory(tmp_path: Path) -> None:
+def test_cli_scan_local_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """scan with local directory runs graph and prints report."""
     (tmp_path / "SKILL.md").write_text("---\nname: scan-test\n---\n# Safe", encoding="utf-8")
-    result = runner.invoke(app, ["scan", str(tmp_path), "--format", "json", "--no-llm"])
+    with caplog.at_level("INFO", logger="skillspector.cli"):
+        result = runner.invoke(app, ["scan", str(tmp_path), "--format", "json", "--no-llm"])
     assert result.exit_code == 0
     assert "scan-test" in result.output or "skill" in result.output
+    json.loads(result.output)
+    assert re.search(r"Total scan time: \d+\.\d{2} seconds", caplog.text)
 
 
 def test_cli_rejects_symlinked_parent_before_preflight(
@@ -1760,14 +1765,16 @@ def test_recursive_transitive_roots_consume_child_time_budget(tmp_path: Path, mo
         show_suppressed: bool = False,
         transitive_traversal=None,
     ) -> dict[str, object]:
-        fake_time["value"] += 61.0
+        fake_time["value"] += cli._TRANSITIVE_MAX_SECONDS + 1.0
         return _mock_graph_result(file_cache={"SKILL.md": "https://github.com/org/dep.git"})
 
     def fake_scan_transitive(*args, traversal=None, **kwargs) -> dict[str, object]:
         assert traversal is not None
         assert traversal.remaining_seconds() == 0.0
         assert traversal.can_scan_more() is False
-        assert traversal.truncation_reasons == ["time budget 60s reached"]
+        assert traversal.truncation_reasons == [
+            f"time budget {cli._TRANSITIVE_MAX_SECONDS:g}s reached"
+        ]
         return {
             "report_body": "{}",
             "filtered_findings": [],

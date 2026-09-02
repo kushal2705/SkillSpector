@@ -66,8 +66,8 @@ from skillspector.models import Finding
 logger = get_logger(__name__)
 
 DEFAULT_MAX_LLM_CONCURRENCY = 10
-API_CONNECTION_MAX_RETRIES = 3
-API_CONNECTION_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
+API_CONNECTION_MAX_RETRIES = 5
+API_CONNECTION_RETRY_DELAYS_SECONDS = (1, 5, 10, 20, 30)
 STRUCTURED_RESPONSE_MAX_RETRIES = 3
 STRUCTURED_RESPONSE_MAX_ATTEMPTS = STRUCTURED_RESPONSE_MAX_RETRIES + 1
 STRUCTURED_RESPONSE_RETRY_DELAYS_SECONDS = API_CONNECTION_RETRY_DELAYS_SECONDS
@@ -115,7 +115,22 @@ class LLMRuntimeLimitError(RuntimeError):
 
 def _is_retryable_api_connection_error(exc: BaseException) -> bool:
     """Return whether *exc* is the narrowly supported transient provider failure."""
-    return type(exc).__name__ == "APIConnectionError"
+    return any(cls.__name__ == "APIConnectionError" for cls in type(exc).__mro__)
+
+
+def _connection_error_details(exc: BaseException) -> str:
+    """Return a bounded, single-line provider error and cause chain."""
+    details: list[str] = []
+    current: BaseException | None = exc
+    for _ in range(3):
+        if current is None:
+            break
+        message = " ".join(str(current).split())[:300]
+        details.append(
+            f"{type(current).__name__}: {message}" if message else type(current).__name__
+        )
+        current = current.__cause__
+    return " (caused by ".join(details) + ")" * (len(details) - 1)
 
 
 def _uses_native_connection_retries(
@@ -853,8 +868,9 @@ class LLMAnalyzerBase:
                 delay = API_CONNECTION_RETRY_DELAYS_SECONDS[connection_retries]
                 connection_retries += 1
                 logger.warning(
-                    "LLM connection failed for %s; retrying in %.2fs (%d/%d)",
+                    "LLM connection failed for %s: %s; retrying in %.2fs (%d/%d)",
                     batch.file_label,
+                    _connection_error_details(exc),
                     delay,
                     connection_retries,
                     API_CONNECTION_MAX_RETRIES,
@@ -922,8 +938,9 @@ class LLMAnalyzerBase:
                 delay = API_CONNECTION_RETRY_DELAYS_SECONDS[connection_retries]
                 connection_retries += 1
                 logger.warning(
-                    "LLM connection failed for %s; retrying in %.2fs (%d/%d)",
+                    "LLM connection failed for %s: %s; retrying in %.2fs (%d/%d)",
                     batch.file_label,
+                    _connection_error_details(exc),
                     delay,
                     connection_retries,
                     API_CONNECTION_MAX_RETRIES,
@@ -1015,16 +1032,16 @@ class LLMAnalyzerBase:
         so users on rate-limited providers can serialize the fan-out; an
         explicit argument still wins.
 
-        Failures are isolated per batch: a provider ``APIConnectionError``
-        receives three bounded exponential-backoff retries (500ms, then 1s,
-        then 2s) when the chat model has no native retry support. OpenAI and
-        Anthropic chat models use their native three-retry policy instead when
+        Failures are isolated per batch: a provider ``APIConnectionError`` or
+        subclass receives five bounded retries (1s, 5s, 10s, 20s, then 30s)
+        when the chat model has no native retry support. OpenAI and Anthropic
+        chat models use their native five-retry policy instead when
         the timeout is static. A dynamic workflow deadline disables native
         retries so every coordinator retry can re-check remaining time.
         Unrecovered errors cost only their own batch and are omitted from the result.
         Malformed structured responses (Pydantic ``ValidationError`` or CLI
-        JSON parse failures) receive three bounded exponential-backoff retries
-        and are then isolated to their batch. A batch makes at most seven outer
+        JSON parse failures) receive three bounded retries (1s, 5s, then 10s)
+        and are then isolated to their batch. A batch makes at most nine outer
         chat-model invocations even when both
         retry policies apply; native provider retries can make additional HTTP
         requests within one invocation.

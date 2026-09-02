@@ -180,7 +180,7 @@ def test_build_context_starts_and_returns_default_graph_wide_budget(tmp_path: Pa
 
     budget = result["workflow_resource_budget"]
     assert isinstance(budget, WorkflowResourceBudget)
-    assert budget.max_seconds == MAX_WORKFLOW_SECONDS == 60.0
+    assert budget.max_seconds == MAX_WORKFLOW_SECONDS == 1200.0
     assert budget.max_bytes == MAX_WORKFLOW_BYTES == 64 * 1024 * 1024
     assert budget.max_artifacts == MAX_WORKFLOW_ARTIFACTS == 10_000
     assert budget.started_at is not None
