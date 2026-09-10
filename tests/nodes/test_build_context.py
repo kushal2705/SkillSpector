@@ -180,7 +180,7 @@ def test_build_context_starts_and_returns_default_graph_wide_budget(tmp_path: Pa
 
     budget = result["workflow_resource_budget"]
     assert isinstance(budget, WorkflowResourceBudget)
-    assert budget.max_seconds == MAX_WORKFLOW_SECONDS == 1200.0
+    assert budget.max_seconds == MAX_WORKFLOW_SECONDS == 4800.0
     assert budget.max_bytes == MAX_WORKFLOW_BYTES == 64 * 1024 * 1024
     assert budget.max_artifacts == MAX_WORKFLOW_ARTIFACTS == 10_000
     assert budget.started_at is not None
@@ -956,6 +956,24 @@ def test_build_context_inventories_hidden_file_for_local_analysis(tmp_path: Path
     assert not any(
         event.get("reason_code") == "hidden_file" for event in result["inspection_ledger"]
     )
+
+
+def test_build_context_excludes_configured_glob_from_llm_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    cache = tmp_path / "data" / "recipes_cache.json"
+    cache.parent.mkdir()
+    cache.write_text('{"recipe": "value"}\n', encoding="utf-8")
+    monkeypatch.setenv("SKILLSPECTOR_LLM_EXCLUDE_GLOBS", "data/*_cache.json")
+
+    result = build_context({"skill_path": str(tmp_path)})
+
+    assert "data/recipes_cache.json" in result["components"]
+    assert "data/recipes_cache.json" in result["local_file_cache"]
+    assert "data/recipes_cache.json" in result["raw_file_cache"]
+    assert "data/recipes_cache.json" not in result["llm_file_cache"]
+    assert "data/recipes_cache.json" not in result["llm_components"]
 
 
 def test_build_context_reports_read_error_without_fake_empty_content(

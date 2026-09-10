@@ -51,6 +51,7 @@ from skillspector.llm_analyzer_base import (
     findings_in_range,
     ledger_events_for_batches,
     number_lines,
+    resolve_batch_input_tokens,
     resolve_max_concurrency,
     resolve_output_language,
 )
@@ -88,6 +89,28 @@ class TestResolveMaxConcurrency:
     def test_below_one_clamps_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILLSPECTOR_MAX_LLM_CONCURRENCY", "0")
         assert resolve_max_concurrency() == 1
+
+
+class TestResolveBatchInputTokens:
+    def test_unset_uses_model_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", raising=False)
+        assert resolve_batch_input_tokens(100_000) == 100_000
+
+    def test_valid_value_caps_batch_input(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "4096")
+        assert resolve_batch_input_tokens(100_000) == 4096
+
+    def test_value_cannot_exceed_model_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "200000")
+        assert resolve_batch_input_tokens(100_000) == 100_000
+
+    def test_invalid_value_uses_model_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "invalid")
+        assert resolve_batch_input_tokens(100_000) == 100_000
+
+    def test_small_value_clamps_to_minimum(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "10")
+        assert resolve_batch_input_tokens(100_000) == 1024
 
 
 class TestOutputLanguage:
@@ -2035,6 +2058,21 @@ class TestLLMMetaAnalyzerGetBatches:
             assert batches[0].is_chunk
             all_findings = [f for b in batches for f in b.findings]
             assert len(all_findings) >= 2
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_configured_batch_input_cap_chunks_earlier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "4096")
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        content = "\n".join(f"line {line}: {'x' * 80}" for line in range(500))
+
+        batches = analyzer.get_batches(["large.py"], {"large.py": content}, [])
+
+        assert len(batches) > 1
+        assert all(batch.is_chunk for batch in batches)
+        assert batches[0].start_line == 1
+        assert batches[-1].end_line == 500
 
     @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
     def test_no_findings_still_creates_batch(self) -> None:

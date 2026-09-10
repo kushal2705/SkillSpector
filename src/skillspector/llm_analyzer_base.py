@@ -66,6 +66,7 @@ from skillspector.models import Finding
 logger = get_logger(__name__)
 
 DEFAULT_MAX_LLM_CONCURRENCY = 10
+MIN_BATCH_INPUT_TOKENS = 1024
 API_CONNECTION_MAX_RETRIES = 5
 API_CONNECTION_RETRY_DELAYS_SECONDS = (1, 5, 10, 20, 30)
 STRUCTURED_RESPONSE_MAX_RETRIES = 3
@@ -294,6 +295,31 @@ def resolve_max_concurrency() -> int:
         logger.warning("SKILLSPECTOR_MAX_LLM_CONCURRENCY=%d < 1; clamping to 1", value)
         return 1
     return value
+
+
+def resolve_batch_input_tokens(model_input_budget: int) -> int:
+    """Resolve an optional per-call input cap, clamped to the model budget."""
+    raw = os.environ.get("SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS", "").strip()
+    if not raw:
+        return model_input_budget
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS=%r (not an int); using model budget %d",
+            raw,
+            model_input_budget,
+        )
+        return model_input_budget
+    if value < MIN_BATCH_INPUT_TOKENS:
+        logger.warning(
+            "SKILLSPECTOR_MAX_BATCH_INPUT_TOKENS=%d < %d; clamping to %d",
+            value,
+            MIN_BATCH_INPUT_TOKENS,
+            MIN_BATCH_INPUT_TOKENS,
+        )
+        value = MIN_BATCH_INPUT_TOKENS
+    return min(value, model_input_budget)
 
 
 # OpenAI suggests ~4 chars per token for English text with BPE tokenizers.
@@ -655,7 +681,7 @@ class LLMAnalyzerBase:
         self.model = model
         self._timeout = timeout
         self._dynamic_timeout = callable(timeout)
-        self._input_budget = get_max_input_tokens(model)
+        self._input_budget = resolve_batch_input_tokens(get_max_input_tokens(model))
         self._llm = get_chat_model(model=model, timeout=self._require_time_remaining())
         # Native SDK retries cannot re-read a workflow-wide deadline between
         # attempts.  A dynamic deadline therefore uses our explicit retry loop,
@@ -751,7 +777,7 @@ class LLMAnalyzerBase:
             file_findings = findings_by_file.get(path, [])
 
             extra = self._estimate_extra_overhead(file_findings)
-            content_budget = max(self._input_budget - base_overhead - extra, 1024)
+            content_budget = max(self._input_budget - base_overhead - extra, MIN_BATCH_INPUT_TOKENS)
 
             content_tokens = estimate_tokens(content)
             if content_tokens <= content_budget:
@@ -763,7 +789,7 @@ class LLMAnalyzerBase:
                     )
                 )
             else:
-                chunk_budget = max(int(content_budget), 1024)
+                chunk_budget = max(int(content_budget), MIN_BATCH_INPUT_TOKENS)
                 for chunk_text, s_line, e_line in chunk_file_by_lines(content, chunk_budget):
                     chunk_findings = findings_in_range(file_findings, s_line, e_line)
                     batches.append(

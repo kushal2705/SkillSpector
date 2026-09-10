@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fnmatch
 import json
 import os
 import re
@@ -102,6 +103,24 @@ MAX_MANIFEST_YAML_DEPTH = 64
 MAX_MANIFEST_PARSE_SECONDS = 1.0
 MAX_MANIFEST_OUTPUT_RECORDS = 1_024
 MAX_MANIFEST_OUTPUT_CHARACTERS = 256 * 1024
+MAX_LLM_EXCLUDE_GLOBS = 32
+MAX_LLM_EXCLUDE_GLOB_LENGTH = 256
+
+
+def _llm_exclude_globs() -> tuple[str, ...]:
+    """Return bounded, normalized globs excluded only from provider calls."""
+    raw = os.environ.get("SKILLSPECTOR_LLM_EXCLUDE_GLOBS", "")
+    patterns = (
+        pattern.strip().replace("\\", "/")
+        for pattern in raw.split(",")[:MAX_LLM_EXCLUDE_GLOBS]
+    )
+    return tuple(pattern for pattern in patterns if 0 < len(pattern) <= MAX_LLM_EXCLUDE_GLOB_LENGTH)
+
+
+def _is_llm_excluded(path: str, patterns: tuple[str, ...]) -> bool:
+    """Return whether *path* matches an explicitly configured provider exclusion."""
+    normalized = path.replace("\\", "/")
+    return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in patterns)
 
 # File type by extension
 _FILE_TYPES: dict[str, str] = {
@@ -807,6 +826,7 @@ def _read_file_cache(
         else MAX_BUNDLE_CACHE_SECONDS,
     )
     total_cached_bytes = 0
+    llm_exclude_globs = _llm_exclude_globs()
 
     def _record_cache_runtime_limit(
         path: str,
@@ -1089,7 +1109,12 @@ def _read_file_cache(
                         )
                     )
             inventory.append(artifact)
-            if not truncated and not _is_hidden_path(path) and artifact["content_kind"] == "text":
+            if (
+                not truncated
+                and not _is_hidden_path(path)
+                and artifact["content_kind"] == "text"
+                and not _is_llm_excluded(path, llm_exclude_globs)
+            ):
                 llm_file_cache[path] = _redact_for_external_model(path, content)
             if aggregate_truncated:
                 inventory.extend(
